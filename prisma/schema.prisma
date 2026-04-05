@@ -1,0 +1,246 @@
+// prisma/schema.prisma
+// Raahi RBAC + Subscription Schema
+// Note: Production DB uses raw SQL (migrations/001_schema.sql).
+// This schema is the single source of truth for type generation.
+// Run: npx prisma generate && npx prisma migrate dev
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ─────────────────────────────────────────────────────
+
+enum Role {
+  DRIVER
+  MECHANIC
+  HELPER
+  ADMIN
+}
+
+enum UserStatus {
+  active
+  suspended
+  deleted
+}
+
+enum SubscriptionTier {
+  NONE
+  BASIC
+  PRO
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+  TRIAL
+}
+
+enum JobStatus {
+  pending
+  matched
+  in_progress
+  completed
+  cancelled
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ── User (core identity + RBAC) ───────────────────────────────
+
+model User {
+  id             String      @id @default(uuid()) @db.Uuid
+  firebaseUid    String      @unique @map("firebase_uid") @db.VarChar(128)
+  phone          String?     @unique @db.VarChar(15)
+  email          String?     @unique @db.VarChar(255)
+  name           String?     @db.VarChar(100)
+  profilePhoto   String?     @map("profile_photo")
+  vehicleType    String      @default("car") @map("vehicle_type") @db.VarChar(50)
+  vehicleReg     String?     @map("vehicle_reg") @db.VarChar(20)
+
+  // RBAC — role controls which routes/features are accessible
+  role           Role        @default(DRIVER)
+
+  ratingAvg      Decimal     @default(0.00) @map("rating_avg") @db.Decimal(3, 2)
+  totalHelps     Int         @default(0) @map("total_helps")
+  walletBalance  Decimal     @default(0.00) @map("wallet_balance") @db.Decimal(10, 2)
+  language       String      @default("hi") @db.VarChar(5)
+  isVerified     Boolean     @default(false) @map("is_verified")
+  status         UserStatus  @default(active)
+  lastSeenAt     DateTime?   @map("last_seen_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  subscription      Subscription?
+  mechanicProfile   MechanicProfile?
+  dailyStreak       DailyStreak?
+  selfieVerification SelfieVerification?
+
+  jobsAsRequester   Job[]           @relation("JobRequester")
+  jobsAsHelper      Job[]           @relation("JobHelper")
+  aiSessions        AiSession[]
+  sosEvents         SosEvent[]
+  highwayAlerts     HighwayAlert[]
+
+  @@map("users")
+}
+
+// ── Subscription ──────────────────────────────────────────────
+// One-to-one with User. Only DRIVER role uses this.
+// MECHANIC and HELPER bypass subscription checks.
+
+model Subscription {
+  id        String             @id @default(uuid()) @db.Uuid
+  userId    String             @unique @map("user_id") @db.Uuid
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tier      SubscriptionTier   @default(NONE)
+
+  // subscriptionStatus — if INACTIVE or EXPIRED, DRIVER cannot create jobs
+  status    SubscriptionStatus @default(INACTIVE)
+
+  // subscriptionExpiry — null means no expiry (lifetime / manual)
+  expiresAt DateTime?          @map("expires_at")
+
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+
+  @@map("subscriptions")
+}
+
+// ── Mechanic Profile ──────────────────────────────────────────
+
+model MechanicProfile {
+  id                 String             @id @default(uuid()) @db.Uuid
+  userId             String             @unique @map("user_id") @db.Uuid
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shopName           String?            @map("shop_name") @db.VarChar(100)
+  specializations    String[]
+  verificationStatus VerificationStatus @default(PENDING) @map("verification_status")
+  isAvailable        Boolean            @default(true) @map("is_available")
+  currentLat         Decimal?           @map("current_lat") @db.Decimal(10, 7)
+  currentLng         Decimal?           @map("current_lng") @db.Decimal(10, 7)
+  lastLocationAt     DateTime?          @map("last_location_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+
+  @@map("mechanic_profiles")
+}
+
+// ── Job (P2P Help Request) ────────────────────────────────────
+
+model Job {
+  id           String    @id @default(uuid()) @db.Uuid
+  requesterId  String    @map("requester_id") @db.Uuid
+  requester    User      @relation("JobRequester", fields: [requesterId], references: [id])
+  helperId     String?   @map("helper_id") @db.Uuid
+  helper       User?     @relation("JobHelper", fields: [helperId], references: [id])
+  status       JobStatus @default(pending)
+  problemType  String    @map("problem_type") @db.VarChar(50)
+  problemDesc  String?   @map("problem_desc")
+  reqLat       Decimal   @map("req_lat") @db.Decimal(10, 7)
+  reqLng       Decimal   @map("req_lng") @db.Decimal(10, 7)
+  highwayName  String?   @map("highway_name") @db.VarChar(100)
+  rewardAmount Decimal   @default(0.00) @map("reward_amount") @db.Decimal(8, 2)
+  helperOtp    String?   @map("helper_otp") @db.VarChar(6)
+  expiresAt    DateTime  @default(dbgenerated("(NOW() + INTERVAL '48 hours')")) @map("expires_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("jobs")
+}
+
+// ── AI Chat ───────────────────────────────────────────────────
+
+model AiSession {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String      @map("user_id") @db.Uuid
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String?     @db.VarChar(200)
+  messages  AiMessage[]
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  @@map("ai_sessions")
+}
+
+model AiMessage {
+  id        String    @id @default(uuid()) @db.Uuid
+  sessionId String    @map("session_id") @db.Uuid
+  session   AiSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String    @db.VarChar(20)  // "user" | "assistant"
+  content   String
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("ai_messages")
+}
+
+// ── SOS + Alerts ──────────────────────────────────────────────
+
+model SosEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id])
+  lat       Decimal  @db.Decimal(10, 7)
+  lng       Decimal  @db.Decimal(10, 7)
+  status    String   @default("active") @db.VarChar(20)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("sos_events")
+}
+
+model HighwayAlert {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id])
+  type      String   @db.VarChar(50)
+  message   String
+  location  String?  @db.VarChar(200)
+  lat       Decimal? @db.Decimal(10, 7)
+  lng       Decimal? @db.Decimal(10, 7)
+  upvotes   Int      @default(0)
+  downvotes Int      @default(0)
+  expiresAt DateTime @default(dbgenerated("(NOW() + INTERVAL '24 hours')")) @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("highway_alerts")
+}
+
+// ── Selfie Verification ───────────────────────────────────────
+
+model SelfieVerification {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @unique @map("user_id") @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  selfieUrl  String?   @map("selfie_url")
+  score      Int       @default(0)
+  status     String    @default("pending") @db.VarChar(20)
+  reviewedAt DateTime? @map("reviewed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@map("selfie_verifications")
+}
+
+// ── Daily Streaks ─────────────────────────────────────────────
+
+model DailyStreak {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @unique @map("user_id") @db.Uuid
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currentStreak Int       @default(0) @map("current_streak")
+  longestStreak Int       @default(0) @map("longest_streak")
+  totalCheckins Int       @default(0) @map("total_checkins")
+  lastCheckin   DateTime? @map("last_checkin") @db.Date
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@map("daily_streaks")
+}
