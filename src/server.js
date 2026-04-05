@@ -6,7 +6,17 @@ const { initFirebase } = require('./services/firebase');
 const { setupWebSocket } = require('./services/websocket');
 const db = require('./db');
 
-const PORT = process.env.PORT || 3000;
+// Railway (and most PaaS platforms) inject PORT dynamically.
+// Never hardcode 8080 or 3000 — always use process.env.PORT.
+// For local development, set PORT=3000 in your .env file.
+const PORT = process.env.PORT;
+
+if (!PORT) {
+  console.error('[Server] FATAL: PORT environment variable is not set.');
+  console.error('         Add PORT=3000 to your .env file for local dev.');
+  console.error('         Railway sets this automatically on deployment.');
+  process.exit(1);
+}
 
 async function start() {
   // 1. Test DB connection
@@ -28,7 +38,7 @@ async function start() {
   // 4. Attach WebSocket server
   setupWebSocket(server);
 
-  // 5. Start listening
+  // 5. Listen on Railway-injected PORT
   server.listen(PORT, () => {
     console.log(`\n🚀 Raahi Backend v2.1 running on port ${PORT}`);
     console.log(`   Health: http://localhost:${PORT}/health`);
@@ -37,9 +47,9 @@ async function start() {
     console.log(`   Env:    ${process.env.NODE_ENV || 'development'}\n`);
   });
 
-  // Graceful shutdown
+  // Graceful shutdown — Railway sends SIGTERM before stopping container
   process.on('SIGTERM', () => {
-    console.log('[Server] Shutting down gracefully...');
+    console.log('[Server] SIGTERM received — shutting down gracefully...');
     server.close(() => {
       db.pool.end();
       process.exit(0);
