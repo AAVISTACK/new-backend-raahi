@@ -1,14 +1,14 @@
 // src/routes/ai.js
 // Flutter screen: ai_mechanic_screen.dart
 // POST /api/v1/ai/chat  — also accepts direct Gemini calls from Flutter
-// Token explosion fix: only last 8 messages sent to Gemini
+// Token explosion fix: only last 4 messages sent to Gemini
 
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../db');
 const axios = require('axios');
 
-const CONTEXT_LIMIT = 8; // Last N messages to send — prevents 400 token errors
+const CONTEXT_LIMIT = 4; // Last 4 messages — strict token budget to prevent API errors
 
 // ── POST /ai/chat ─────────────────────────────────────────────
 router.post('/chat', requireAuth, async (req, res) => {
@@ -36,7 +36,7 @@ router.post('/chat', requireAuth, async (req, res) => {
     [sessionId, message]
   );
 
-  // Get LAST 8 messages only — THE TOKEN FIX
+  // Get LAST 4 messages only — strict token budget
   const { rows: recentMessages } = await db.query(
     `SELECT role, content FROM ai_messages
      WHERE session_id = $1
@@ -84,7 +84,6 @@ If the problem is dangerous, always suggest calling emergency services first.`;
       return res.status(503).json({ error: 'AI_RATE_LIMITED', message: 'AI busy, thodi der mein try karo' });
     }
     if (err.response?.status === 400) {
-      // Context too long — start new session
       return res.status(422).json({
         error: 'CONTEXT_TOO_LONG',
         message: 'Naya conversation shuru karo',
@@ -101,10 +100,7 @@ If the problem is dangerous, always suggest calling emergency services first.`;
     [sessionId, aiReply]
   );
 
-  res.json({
-    reply: aiReply,
-    session_id: sessionId,
-  });
+  res.json({ reply: aiReply, session_id: sessionId });
 });
 
 // ── GET /ai/sessions ──────────────────────────────────────────
